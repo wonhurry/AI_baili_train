@@ -1,0 +1,116 @@
+import time
+import mss
+import numpy as np
+import cv2
+import torch
+from pynput.mouse import Button, Controller, Listener
+from utils.augmentations import letterbox
+from utils.general import check_img_size, non_max_suppression, scale_coords, xyxy2xywh
+from utils.plots import Annotator, colors
+from auto_aim.config import *
+from load_model import get_model
+def pred_img(img0):
+    imgsz = check_img_size(IMGSZ, s=stride)
+    img = letterbox(img0, IMGSZ, stride=stride, auto=True)[0]
+    img = img.transpose((2, 0, 1))[::-1]
+    img = np.ascontiguousarray(img)
+    model.warmup(imgsz=(1, 3, *imgsz))
+    img = torch.from_numpy(img).to(device)
+    img = img.half() if model.fp16 else img.float()
+    img /= 255
+    if len(img.shape) == 3:
+        im = img[None]
+    pred = model(im, augment=False, visualize=False)
+    pred = non_max_suppression(pred, CONF_THRES, IOU_THRES, None, False, max_det=5)
+    det = pred[0]
+    im0 = img0.copy()
+    gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]
+    annotator = Annotator(im0, line_width=LINE_THICKNESS, example=str(names))
+    xywh_list = []
+    if len(det):
+        det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+        for *xyxy, conf, cls in reversed(det):
+            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+            xywh_list.append(xywh)
+            c = int(cls)
+            label = None if HIDE_LABELS else (names[c] if HIDE_CONF else f'{names[c]} {conf:.2f}')
+            annotator.box_label(xyxy, label, color=colors(c, True))
+    im0 = annotator.result()
+    return im0, xywh_list
+def auto_aim(xywh_list1, xywh_list2, left, top, width, height):
+    perfect1 = None
+    for xywh1 in xywh_list1:
+        x1, y1, w1, h1 = xywh1
+        distance1 = (x1 - 0.5) ** 2 + (y1 - 0.5) ** 2
+        if not perfect1:
+            perfect1 = ((x1, y1, w1, h1), distance1)
+        else:
+            old_distance1 = perfect1[1]
+            if distance1 < old_distance1:
+                perfect1 = ((x1, y1, w1, h1), distance1)
+    fuhao1 = [(x1 - 0.5), (y1 - 0.5 + h1 * 0.9)]
+    xiangliang1 = [abs((x1 - 0.5) * rab1 * width + 10), abs((y1 - 0.5 + h1 * 0.9) * height)]
+    if fuhao1[0] < 0:
+        xiangliang1[0] = -xiangliang1[0]
+    if fuhao1[1] < 0:
+        xiangliang1[1] = -xiangliang1[1]
+    perfect2 = None
+    for xywh2 in xywh_list2:
+        x2, y2, w2, h2 = xywh2
+        distance2 = (x2 - 0.5) ** 2 + (y2 - 0.5) ** 2
+        if not perfect2:
+            perfect2 = ((x2, y2, w2, h2), distance2)
+        else:
+            old_distance2 = perfect2[1]
+            if distance2 < old_distance2:
+                perfect2 = ((x2, y2, w2, h2), distance2)
+    fuhao2 = [(x2 - 0.5), (y2 - 0.5 + h2 * 0.9)]
+    xiangliang2 = [abs((x2 - 0.5) * rab1 * width + 10), abs((y2 - 0.5 + h2 * 0.9) * height)]
+    if fuhao2[0] < 0:
+        xiangliang2[0] = -xiangliang2[0]
+    if fuhao2[1] < 0:
+        xiangliang2[1] = -xiangliang2[1]
+    if (xiangliang2[0] - xiangliang1[0]) ** 2 + (xiangliang2[1] - xiangliang1[1]) ** 2 > 13:
+        xiangliang3 = [int(3 * xiangliang2[0] - 2 * xiangliang1[0]), int(3 * xiangliang2[1] - 2 * xiangliang1[1])]
+    else:
+        xiangliang3 = [int((xiangliang2[0] + xiangliang1[0]) / 2), int((xiangliang2[1] + xiangliang1[1]) / 2)]
+    return xiangliang3
+def on_click(x, y, button, pressed):
+    global LOCK_AIM
+    if button == button.x1:
+        if pressed:
+            LOCK_AIM = not LOCK_AIM
+device, half, model, stride, names, imgsz = get_model()
+mouse_controller = Controller()
+sct = mss.mss()
+listener = Listener(on_click=on_click)
+print(listener)
+listener.start()
+time1 = time.time()
+while True:
+    if LOCK_AIM:
+        mouse_controller.position = (screen_width/2, screen_height/2)
+        time.sleep(0.02)
+        mouse_controller.press(Button.left)
+        time1 = time.time()
+        LOCK_AIM = False
+        begin = True
+    time2 = time.time()
+    if begin and time2 - time1 > 2:
+        img = sct.grab(monitor=monitor)
+        img = np.array(img)
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        img, aims1 = pred_img(img)
+        img = sct.grab(monitor=monitor)
+        img = np.array(img)
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        img, aims2 = pred_img(img)
+        begin = False
+        if aims1 and aims2:
+            x, y = auto_aim(aims1, aims2, **monitor)
+            mouse_controller.move(x, y)
+            mouse_controller.release(Button.left)
+        else:
+            mouse_controller.move(0.409375*screen_width, -0.284444*screen_height)
+            time.sleep(0.1)
+            mouse_controller.release(Button.left)
